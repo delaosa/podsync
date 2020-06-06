@@ -2,11 +2,11 @@ package config
 
 import (
 	"fmt"
+	"io/ioutil"
 	"path/filepath"
-	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/hashicorp/go-multierror"
+	"github.com/naoina/toml"
 	"github.com/pkg/errors"
 
 	"github.com/mxpv/podsync/pkg/model"
@@ -34,8 +34,6 @@ type Feed struct {
 	MaxHeight int `toml:"max_height"`
 	// Format to use for this feed
 	Format model.Format `toml:"format"`
-	// Custom image to use
-	CoverArt string `toml:"cover_art"`
 	// Only download episodes that match this regexp (defaults to matching anything)
 	Filters Filters `toml:"filters"`
 	// Clean is a cleanup policy to use for this feed
@@ -46,20 +44,16 @@ type Feed struct {
 	OPML bool `toml:"opml"`
 }
 
+type Filters struct {
+	Title string `toml:"title"`
+	// More filters to be added here
+}
+
 type Custom struct {
 	CoverArt string `toml:"cover_art"`
 	Category string `toml:"category"`
 	Explicit bool   `toml:"explicit"`
 	Language string `toml:"lang"`
-}
-
-type Tokens struct {
-	// YouTube API key.
-	// See https://developers.google.com/youtube/registering_an_application
-	YouTube string `toml:"youtube"`
-	// Vimeo developer key.
-	// See https://developer.vimeo.com/api/guides/start#generate-access-token
-	Vimeo string `toml:"vimeo"`
 }
 
 type Server struct {
@@ -90,24 +84,51 @@ type Cleanup struct {
 	KeepLast int `toml:"keep_last"`
 }
 
+type Log struct {
+	// Filename to write the log to (instead of stdout)
+	Filename string `toml:"filename"`
+	// MaxSize is the maximum size of the log file in MB
+	MaxSize int `toml:"max_size"`
+	// MaxBackups is the maximum number of log file backups to keep after rotation
+	MaxBackups int `toml:"max_backups"`
+	// MaxAge is the maximum number of days to keep the logs for
+	MaxAge int `toml:"max_age"`
+	// Compress old backups
+	Compress bool `toml:"compress"`
+}
+
+// Downloader is a youtube-dl related configuration
+type Downloader struct {
+	// SelfUpdate toggles self update every 24 hour
+	SelfUpdate bool `toml:"self_update"`
+}
+
 type Config struct {
 	// Server is the web server configuration
 	Server Server `toml:"server"`
+	// Log is the optional logging configuration
+	Log Log `toml:"log"`
 	// Database configuration
 	Database Database `toml:"database"`
 	// Feeds is a list of feeds to host by this app.
 	// ID will be used as feed ID in http://podsync.net/{FEED_ID}.xml
 	Feeds map[string]*Feed
 	// Tokens is API keys to use to access YouTube/Vimeo APIs.
-	Tokens Tokens `toml:"tokens"`
+	Tokens map[model.Provider]StringSlice `toml:"tokens"`
+	// Downloader (youtube-dl) configuration
+	Downloader Downloader `toml:"downloader"`
 }
 
 // LoadConfig loads TOML configuration from a file path
 func LoadConfig(path string) (*Config, error) {
-	config := Config{}
-	_, err := toml.DecodeFile(path, &config)
+	data, err := ioutil.ReadFile(path)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to load config file")
+		return nil, errors.Wrapf(err, "failed to read config file: %s", path)
+	}
+
+	config := Config{}
+	if err := toml.Unmarshal(data, &config); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal toml")
 	}
 
 	for id, feed := range config.Feeds {
@@ -152,6 +173,18 @@ func (c *Config) applyDefaults(configPath string) {
 		}
 	}
 
+	if c.Log.Filename != "" {
+		if c.Log.MaxSize == 0 {
+			c.Log.MaxSize = model.DefaultLogMaxSize
+		}
+		if c.Log.MaxAge == 0 {
+			c.Log.MaxAge = model.DefaultLogMaxAge
+		}
+		if c.Log.MaxBackups == 0 {
+			c.Log.MaxBackups = model.DefaultLogMaxBackups
+		}
+	}
+
 	if c.Database.Dir == "" {
 		c.Database.Dir = filepath.Join(filepath.Dir(configPath), "db")
 	}
@@ -173,19 +206,4 @@ func (c *Config) applyDefaults(configPath string) {
 			feed.PageSize = model.DefaultPageSize
 		}
 	}
-}
-
-type Duration struct {
-	time.Duration
-}
-
-func (d *Duration) UnmarshalText(text []byte) error {
-	var err error
-	d.Duration, err = time.ParseDuration(string(text))
-	return err
-}
-
-type Filters struct {
-	Title string `toml:"title"`
-	// More filters to be added here
 }

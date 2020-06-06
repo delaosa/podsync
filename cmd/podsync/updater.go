@@ -14,6 +14,7 @@ import (
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/mxpv/podsync/pkg/builder"
 	"github.com/mxpv/podsync/pkg/config"
 	"github.com/mxpv/podsync/pkg/db"
 	"github.com/mxpv/podsync/pkg/feed"
@@ -31,14 +32,26 @@ type Updater struct {
 	downloader Downloader
 	db         db.Storage
 	fs         fs.Storage
+	keys       map[model.Provider]feed.KeyProvider
 }
 
 func NewUpdater(config *config.Config, downloader Downloader, db db.Storage, fs fs.Storage) (*Updater, error) {
+	keys := map[model.Provider]feed.KeyProvider{}
+
+	for name, list := range config.Tokens {
+		provider, err := feed.NewKeyProvider(list)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to create key provider for %q", name)
+		}
+		keys[name] = provider
+	}
+
 	return &Updater{
 		config:     config,
 		downloader: downloader,
 		db:         db,
 		fs:         fs,
+		keys:       keys,
 	}, nil
 }
 
@@ -52,19 +65,19 @@ func (u *Updater) Update(ctx context.Context, feedConfig *config.Feed) error {
 	started := time.Now()
 
 	if err := u.updateFeed(ctx, feedConfig); err != nil {
-		return err
+		return errors.Wrap(err, "update failed")
 	}
 
 	if err := u.downloadEpisodes(ctx, feedConfig); err != nil {
-		return err
+		return errors.Wrap(err, "download failed")
 	}
 
 	if err := u.buildXML(ctx, feedConfig); err != nil {
-		return err
+		return errors.Wrap(err, "xml build failed")
 	}
 
 	if err := u.buildOPML(ctx); err != nil {
-		return err
+		return errors.Wrap(err, "opml build failed")
 	}
 
 	if err := u.cleanup(ctx, feedConfig); err != nil {
@@ -78,8 +91,18 @@ func (u *Updater) Update(ctx context.Context, feedConfig *config.Feed) error {
 
 // updateFeed pulls API for new episodes and saves them to database
 func (u *Updater) updateFeed(ctx context.Context, feedConfig *config.Feed) error {
+	info, err := builder.ParseURL(feedConfig.URL)
+	if err != nil {
+		return errors.Wrapf(err, "failed to parse URL: %s", feedConfig.URL)
+	}
+
+	keyProvider, ok := u.keys[info.Provider]
+	if !ok {
+		return errors.Errorf("key provider %q not loaded", info.Provider)
+	}
+
 	// Create an updater for this feed type
-	provider, err := feed.New(ctx, feedConfig, u.config.Tokens)
+	provider, err := builder.New(ctx, info.Provider, keyProvider.Get())
 	if err != nil {
 		return err
 	}
@@ -105,7 +128,10 @@ func (u *Updater) downloadEpisodes(ctx context.Context, feedConfig *config.Feed)
 	var (
 		feedID       = feedConfig.ID
 		downloadList []*model.Episode
+		pageSize     = feedConfig.PageSize
 	)
+
+	log.WithField("page_size", pageSize).Info("downloading episodes")
 
 	// Build the list of files to download
 	if err := u.db.WalkEpisodes(ctx, feedID, func(episode *model.Episode) error {
@@ -117,15 +143,22 @@ func (u *Updater) downloadEpisodes(ctx context.Context, feedConfig *config.Feed)
 		if feedConfig.Filters.Title != "" {
 			matched, err := regexp.MatchString(feedConfig.Filters.Title, episode.Title)
 			if err != nil {
-				log.Warnf("Pattern '%s' is not a valid filter for %s Title", feedConfig.Filters.Title, feedConfig.ID)
+				log.Warnf("pattern %q is not a valid filter for %q Title", feedConfig.Filters.Title, feedConfig.ID)
 			} else {
 				if !matched {
-					log.Infof("Skipping '%s' due to lack of match with '%s'", episode.Title, feedConfig.Filters.Title)
+					log.Infof("skipping %q due to lack of match with %q", episode.Title, feedConfig.Filters.Title)
 					return nil
 				}
 			}
 		}
 
+		// Limit the number of episodes downloaded at once
+		pageSize--
+		if pageSize <= 0 {
+			return nil
+		}
+
+		log.Debugf("adding %s (%q) to queue", episode.ID, episode.Title)
 		downloadList = append(downloadList, episode)
 		return nil
 	}); err != nil {
@@ -186,6 +219,7 @@ func (u *Updater) downloadEpisodes(ctx context.Context, feedConfig *config.Feed)
 			// We still need to generate XML, so just stop sending download requests and
 			// retry next time
 			if err == ytdl.ErrTooManyRequests {
+				logger.Warn("server responded with a 'Too Many Requests' error")
 				break
 			}
 
@@ -206,7 +240,6 @@ func (u *Updater) downloadEpisodes(ctx context.Context, feedConfig *config.Feed)
 			logger.WithError(err).Error("failed to copy file")
 			return err
 		}
-		logger.Debugf("copied %d bytes", fileSize)
 
 		// Update file status in database
 
@@ -252,7 +285,6 @@ func (u *Updater) buildXML(ctx context.Context, feedConfig *config.Feed) error {
 }
 
 func (u *Updater) buildOPML(ctx context.Context) error {
-
 	// Build OPML with data received from builder
 	log.Debug("building podcast OPML")
 	opml, err := feed.BuildOPML(ctx, u.config, u.db, u.fs)

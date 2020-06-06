@@ -29,11 +29,13 @@ any device in podcast client.
 - One-click deployment for AWS.
 - Runs on Windows, Mac OS, Linux, and Docker.
 - Supports ARM.
+- Automatic youtube-dl self update.
+- Supports API keys rotation.
 
 ## Dependencies
 
 If you're running the CLI as binary (e.g. not via Docker), you need to make sure that dependencies are available on
-your system. Currently Podsync depends on `youtube-dl` and `ffmpeg`.
+your system. Currently, Podsync depends on `youtube-dl` and `ffmpeg`.
 
 On Mac you can install those with `brew`:
 ```
@@ -57,9 +59,13 @@ Here is an example how configuration might look like:
 port = 8080
 data_dir = "/app/data" # Don't change if you run podsync via docker
 
+# Tokens from `Access tokens` section
 [tokens]
-youtube = "{YOUTUBE_API_TOKEN}" # Tokens from `Access tokens` section
-vimeo = "{VIMEO_API_TOKEN}"
+youtube = "YOUTUBE_API_TOKEN" # YouTube API Key. See https://developers.google.com/youtube/registering_an_application
+vimeo = [ # Multiple keys will be rotated.
+  "VIMEO_API_KEY_1", # Vimeo developer keys. See https://developer.vimeo.com/api/guides/start#generate-access-token
+  "VIMEO_API_KEY_2"
+]
 
 [feeds]
   [feeds.ID1]
@@ -68,7 +74,7 @@ vimeo = "{VIMEO_API_TOKEN}"
   update_period = "12h" # How often query for updates, examples: "60m", "4h", "2h45m"
   quality = "high" # or "low"
   format = "video" # or "audio"
-  # cover_art = "{IMAGE_URL}" # Optional URL address of an image file
+  # custom = { cover_art = "{IMAGE_URL}}", category = "TV", explicit = true, lang = "en" } # Optional feed customizations
   # max_height = "720" # Optional maximal height of video, example: 720, 1080, 1440, 2160, ...
   # cron_schedule = "@every 12h" # Optional cron expression format. If set then overwrite 'update_period'. See details below
   # filters = { title = "regex for title here" } # Optional Golang regexp format. If set, then only download episodes with matching titles.
@@ -77,6 +83,18 @@ vimeo = "{VIMEO_API_TOKEN}"
 
 [database]
   badger = { truncate = true, file_io = true } # See https://github.com/dgraph-io/badger#memory-usage
+
+[downloader]
+self_update = true # Optional, auto update youtube-dl every 24 hours
+
+# Optional log config. If not specified logs to the stdout
+[log]
+filename = "podsync.log"
+max_size = 50 # MB
+max_age = 30 # days
+max_backups = 7
+compress = true
+
 ```
 
 Episodes files will be kept at: `/path/to/data/directory/ID1`, feed will be accessible from: `http://localhost/ID1.xml`

@@ -18,6 +18,8 @@ import (
 	"github.com/mxpv/podsync/pkg/db"
 	"github.com/mxpv/podsync/pkg/fs"
 	"github.com/mxpv/podsync/pkg/ytdl"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 type Opts struct {
@@ -72,22 +74,32 @@ func main() {
 		log.Info(banner)
 	}
 
+	// Load TOML file
+	log.Debugf("loading configuration %q", opts.ConfigPath)
+	cfg, err := config.LoadConfig(opts.ConfigPath)
+	if err != nil {
+		log.WithError(err).Fatal("failed to load configuration file")
+	}
+
+	if cfg.Log.Filename != "" {
+		log.SetOutput(&lumberjack.Logger{
+			Filename:   cfg.Log.Filename,
+			MaxSize:    cfg.Log.MaxSize,
+			MaxBackups: cfg.Log.MaxBackups,
+			MaxAge:     cfg.Log.MaxAge,
+			Compress:   cfg.Log.Compress,
+		})
+	}
+
 	log.WithFields(log.Fields{
 		"version": version,
 		"commit":  commit,
 		"date":    date,
 	}).Info("running podsync")
 
-	downloader, err := ytdl.New(ctx)
+	downloader, err := ytdl.New(ctx, cfg.Downloader.SelfUpdate)
 	if err != nil {
 		log.WithError(err).Fatal("youtube-dl error")
-	}
-
-	// Load TOML file
-	log.Debugf("loading configuration %q", opts.ConfigPath)
-	cfg, err := config.LoadConfig(opts.ConfigPath)
-	if err != nil {
-		log.WithError(err).Fatal("failed to load configuration file")
 	}
 
 	database, err := db.NewBadger(&cfg.Database)
@@ -111,7 +123,7 @@ func main() {
 	updates := make(chan *config.Feed, 16)
 	defer close(updates)
 
-	//Create Cron
+	// Create Cron
 	c := cron.New(cron.WithChain(cron.SkipIfStillRunning(nil)))
 	m := make(map[string]cron.EntryID)
 
@@ -123,7 +135,7 @@ func main() {
 				if err := updater.Update(ctx, feed); err != nil {
 					log.WithError(err).Errorf("failed to update feed: %s", feed.URL)
 				} else {
-					log.Infof("Next update of %s: %s", feed.ID, c.Entry(m[feed.ID]).Next)
+					log.Infof("next update of %s: %s", feed.ID, c.Entry(m[feed.ID]).Next)
 				}
 			case <-ctx.Done():
 				return ctx.Err()
@@ -133,22 +145,21 @@ func main() {
 
 	// Run cron scheduler
 	group.Go(func() error {
-		var cronid cron.EntryID
+		var cronID cron.EntryID
 
 		for _, feed := range cfg.Feeds {
 			if feed.CronSchedule == "" {
 				feed.CronSchedule = fmt.Sprintf("@every %s", feed.UpdatePeriod.String())
 			}
 			_feed := feed
-			if cronid, err = c.AddFunc(_feed.CronSchedule, func() {
+			if cronID, err = c.AddFunc(_feed.CronSchedule, func() {
 				log.Debugf("adding %q to update queue", _feed.ID)
 				updates <- _feed
-
 			}); err != nil {
 				log.WithError(err).Fatalf("can't create cron task for feed: %s", _feed.ID)
 			}
 
-			m[_feed.ID] = cronid
+			m[_feed.ID] = cronID
 			log.Debugf("-> %s (update '%s')", _feed.ID, _feed.CronSchedule)
 			// Perform initial update after CLI restart
 			updates <- _feed
